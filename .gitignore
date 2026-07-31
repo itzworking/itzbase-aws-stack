@@ -1,0 +1,9 @@
+*.js
+!lambda/**/*.js
+*.d.ts
+node_modules
+.cdk.staging
+cdk.out
+.env
+*.local.*
+.idea
