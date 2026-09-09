@@ -18,6 +18,7 @@ const {
   hasValidSyntax,
   isDeliverable,
 } = require("./recipients");
+const { normalizeAttachments } = require("./attachments");
 
 // Plain JS so it needs no bundling; the Lambda Node 22 runtime ships AWS SDK v3.
 // Producer + read side of the throttled mailer, exposed as a drop-in /emails API
@@ -175,16 +176,16 @@ function findProfile(profiles, apiKey) {
 // { error } (caller responds 422), { fake: true } (every `to` recipient is
 // fake: caller acknowledges with FAKE_EMAIL_ID and sends nothing), or
 // { message } ready to enqueue. Fake cc/bcc recipients are dropped silently.
-// Attachments and scheduled sends are not supported by this gateway.
+// Attachments are URL references only (see attachments.js); scheduled sends
+// are not supported by this gateway.
 function buildMessage(input, profile, defaults) {
   if (!input || typeof input !== "object") return { error: "Invalid email object" };
 
   if (input.scheduled_at != null || input.scheduledAt != null) {
     return { error: "Scheduling (scheduled_at) is not supported" };
   }
-  if (Array.isArray(input.attachments) && input.attachments.length > 0) {
-    return { error: "Attachments are not supported" };
-  }
+  const attachments = normalizeAttachments(input.attachments);
+  if (attachments.error) return { error: attachments.error };
 
   const toRaw = toList(input.to);
   if (toRaw.length === 0) return { error: "Missing recipient: to" };
@@ -237,6 +238,7 @@ function buildMessage(input, profile, defaults) {
       subject,
       html,
       text,
+      attachments: attachments.attachments,
       tags: Array.isArray(input.tags) ? input.tags : [],
       profile: profile.slug,
     },

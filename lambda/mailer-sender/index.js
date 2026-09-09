@@ -4,6 +4,7 @@ const {
   GetAccountCommand,
 } = require("@aws-sdk/client-sesv2");
 const { SSMClient, GetParameterCommand } = require("@aws-sdk/client-ssm");
+const { buildRawMessage } = require("./mime");
 
 // Plain JS so it needs no bundling; the Lambda Node 22 runtime ships AWS SDK v3.
 // Consumer side of the throttled mailer: SQS (FIFO, single message group)
@@ -15,6 +16,12 @@ const ses = new SESv2Client({});
 const ssm = new SSMClient({});
 
 const CONFIG_SET_PARAM = "/itzbase/ses/configuration-set";
+// Attachments are fetched at send time. The total cap keeps the raw message
+// under SES's 40 MB limit once base64-encoded (4/3 overhead) and within the
+// function's memory; the per-fetch timeout keeps one dead host from eating
+// the batch's Lambda timeout.
+const MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 15_000;
 
 let configSetCache; // string | null once resolved
 let sendRateCache; // number once resolved
@@ -46,14 +53,56 @@ async function getSendRate() {
   return sendRateCache;
 }
 
+async function fetchAttachment(attachment) {
+  const res = await fetch(attachment.url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    redirect: "follow",
+  });
+  if (!res.ok) {
+    throw new Error(`attachment fetch failed: ${res.status} ${attachment.url}`);
+  }
+  const data = Buffer.from(await res.arrayBuffer());
+  const contentType =
+    attachment.contentType ||
+    res.headers.get("content-type")?.split(";")[0].trim() ||
+    "application/octet-stream";
+  return { filename: attachment.filename, contentType, data };
+}
+
+async function fetchAttachments(attachments) {
+  const fetched = await Promise.all(attachments.map(fetchAttachment));
+  const total = fetched.reduce((sum, a) => sum + a.data.length, 0);
+  if (total > MAX_ATTACHMENTS_BYTES) {
+    throw new Error(
+      `attachments too large: ${total} bytes (max ${MAX_ATTACHMENTS_BYTES})`,
+    );
+  }
+  return fetched;
+}
+
+function simpleContent(message) {
+  const bodyContent = {};
+  if (message.html) bodyContent.Html = { Data: message.html, Charset: "UTF-8" };
+  if (message.text) bodyContent.Text = { Data: message.text, Charset: "UTF-8" };
+  return {
+    Simple: {
+      Subject: { Data: message.subject, Charset: "UTF-8" },
+      Body: bodyContent,
+    },
+  };
+}
+
 async function sendOne(message, configSet) {
   const destination = { ToAddresses: message.to };
   if (message.cc?.length) destination.CcAddresses = message.cc;
   if (message.bcc?.length) destination.BccAddresses = message.bcc;
 
-  const bodyContent = {};
-  if (message.html) bodyContent.Html = { Data: message.html, Charset: "UTF-8" };
-  if (message.text) bodyContent.Text = { Data: message.text, Charset: "UTF-8" };
+  // Simple content has no attachment slot, so a send with attachments goes
+  // through raw MIME instead; Destination stays the envelope in both cases.
+  const attachments = message.attachments || [];
+  const content = attachments.length
+    ? { Raw: { Data: buildRawMessage(message, await fetchAttachments(attachments)) } }
+    : simpleContent(message);
 
   // Stamp our emailId as a message tag so it rides into every SES event
   // notification (mail.tags), letting the ingest Lambda map the caller's id to
@@ -67,12 +116,7 @@ async function sendOne(message, configSet) {
       ...(message.emailId
         ? { EmailTags: [{ Name: "itz-email-id", Value: message.emailId }] }
         : {}),
-      Content: {
-        Simple: {
-          Subject: { Data: message.subject, Charset: "UTF-8" },
-          Body: bodyContent,
-        },
-      },
+      Content: content,
     }),
   );
   return res.MessageId;

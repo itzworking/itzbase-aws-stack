@@ -33,8 +33,11 @@ credentials only.
   Auth is `Authorization: Bearer <key>` or `x-api-key`, matched against
   per-profile keys in SSM (`/itzbase/profiles/<slug>/api-key`). Sends are
   paced to the account's SES max send rate through a FIFO queue, so the
-  gateway can never exceed SES limits. Not supported: `scheduled_at`,
-  `attachments` (rejected with `422 validation_error`), custom `headers`
+  gateway can never exceed SES limits. Attachments are URL references,
+  `attachments: [{ filename, url, content_type? }]` (`path` is accepted as
+  an alias of `url`), fetched by the sender at send time, at most 10 per
+  email and 25 MB in total; inline `content` is rejected with
+  `422 validation_error`. Not supported: `scheduled_at`, custom `headers`
   (accepted but ignored).
 
 ## The contract

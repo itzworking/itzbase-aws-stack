@@ -53,7 +53,12 @@ export class MailerApi extends Construct {
       code: Code.fromAsset(
         path.join(__dirname, "..", "..", "lambda", "mailer-sender"),
       ),
-      timeout: Duration.seconds(60),
+      // A batch of 10 sends may each fetch attachments (15 s cap per fetch)
+      // before the paced SES call; the queue's visibility timeout (180 s) must
+      // stay above this or SQS redelivers mid-batch. Memory covers holding one
+      // send's attachments plus their base64 raw message.
+      timeout: Duration.seconds(120),
+      memorySize: 512,
       // No reserved concurrency (it can exceed a freshly-vended account's Lambda
       // limit and fail the deploy). The FIFO queue uses a single message group,
       // so SQS processes one batch at a time = serial; combined with in-handler
